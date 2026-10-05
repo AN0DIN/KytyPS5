@@ -48,6 +48,13 @@ struct GraphicContext {
 	Common::Mutex                             queue_mutex;
 	uint32_t                                  queue_family = static_cast<uint32_t>(-1);
 	vk::Queue                                 queue        = nullptr;
+	// A queue of a transfer-only family (a copy engine that runs beside the graphics one), for
+	// buffer readbacks that must not wait for the work queued on `queue` after the writes they
+	// read. Null without such a family; buffers are then shared by `queue_family` alone.
+	vk::Queue                          readback_queue  = nullptr;
+	uint32_t                           readback_family = static_cast<uint32_t>(-1);
+	// Draws whose arguments the GPU writes read them on the GPU (vkCmdDraw*Indirect*).
+	bool                               indirect_draws_enabled                = false;
 
 	[[nodiscard]] const vk::PhysicalDeviceProperties& GetPhysicalDeviceProperties() const {
 		return physical_device_properties;
