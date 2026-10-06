@@ -15,6 +15,7 @@ struct WideStoreSplitResult {
 	uint64_t relocated        = 0; // hot short stores patched by moving the next instructions along
 	uint64_t unsupported = 0; // segment override, encoder failure or trampoline area full
 	uint64_t trampoline_bytes = 0;
+	uint64_t half_converts    = 0; // vcvtps2ph stores among the candidates (converted in a register)
 };
 
 // Rosetta aborts the process when a 256-bit store that crosses into a write-protected page

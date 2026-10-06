@@ -282,13 +282,51 @@ void TestAlignedStoresAreNotSplit() {
 	Check(cursor == area.trampolines, "aligned stores use no trampoline space");
 }
 
+// vcvtps2ph [rdi], ymm8, 3 whose 16-byte store straddles a write-protected page: Rosetta aborts on
+// it unpatched (any vcvtps2ph store that faults). Patched, it converts in ymm8, stores with a plain
+// vmovups, and ymm8 comes back unchanged (stored to [rdx] afterwards).
+void TestHalfConvertStore() {
+	auto area = MakeCode();
+	const std::array<uint8_t, 21> code = {
+	    0xc5, 0x7c, 0x10, 0x06,             // vmovups ymm8, [rsi]
+	    0xc4, 0x63, 0x7d, 0x1d, 0x07, 0x03, // vcvtps2ph [rdi], ymm8, 3
+	    0xc5, 0x7c, 0x11, 0x42, 0x00,       // vmovups [rdx + 0], ymm8 (long enough for a jump)
+	    0xc5, 0xf8, 0x77,                   // vzeroupper
+	    0xc3, 0xcc, 0xcc};
+	std::memcpy(area.code, code.data(), code.size());
+	auto       cursor = area.trampolines;
+	const auto result = Loader::X64InstructionEmulator::SplitWideStores(
+	    reinterpret_cast<uint64_t>(area.code), code.size(), &cursor, area.end);
+	Check(result.half_converts == 1, "vcvtps2ph store found");
+	Check(area.code[4] == 0xe9, "vcvtps2ph store replaced by a rel32 jump");
+	auto* data = static_cast<uint8_t*>(
+	    mmap(nullptr, 4 * g_page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0));
+	const float source[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+	float       restored[8] {};
+	uint8_t*    boundary = data + 2 * g_page_size;
+	mprotect(boundary, g_page_size, PROT_READ);
+	using ConvertFunc = void (*)(uint8_t*, const float*, float*);
+	reinterpret_cast<ConvertFunc>(area.code)(boundary - 8, source, restored);
+	const uint16_t expected[8] = {0x3c00, 0x4000, 0x4200, 0x4400, 0x4500, 0x4600, 0x4700, 0x4800};
+	Check(std::memcmp(boundary - 8, expected, sizeof(expected)) == 0,
+	      "vcvtps2ph store wrote the 8 halves across the page");
+	Check(std::memcmp(restored, source, sizeof(source)) == 0, "ymm8 restored after the store");
+}
+
 } // namespace
 
 int main() {
 	g_page_size = sysconf(_SC_PAGESIZE);
 	struct sigaction action {};
 	action.sa_sigaction = UnprotectOnFault;
-	action.sa_flags     = SA_SIGINFO;
+	// Like the emulator's guest threads: the handler runs on its own stack, so the vcvtps2ph
+	// trampoline's spill below the red zone survives the fault.
+	static uint8_t signal_stack[64 * 1024];
+	stack_t        stack {};
+	stack.ss_sp   = signal_stack;
+	stack.ss_size = sizeof(signal_stack);
+	sigaltstack(&stack, nullptr);
+	action.sa_flags = SA_SIGINFO | SA_ONSTACK;
 	sigaction(SIGSEGV, &action, nullptr);
 	sigaction(SIGBUS, &action, nullptr);
 
@@ -303,6 +341,7 @@ int main() {
         TestShortStoreViaLongStoreDeadBytes();
         TestRipRelativeStore();
 	TestAlignedStoresAreNotSplit();
+	TestHalfConvertStore();
 
 	if (g_failures != 0) {
 		std::fprintf(stderr, "%d check(s) failed\n", g_failures);

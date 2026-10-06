@@ -1877,10 +1877,10 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			Common::VirtualMemory::FlushInstructionCache(segment_addr, segment_size);
 			LOGF("Guest 256-bit store splitting: %s, candidates=%" PRIu64 ", patched=%" PRIu64
 			     " (via padding=%" PRIu64 ", ud2=%" PRIu64 ", moved=%" PRIu64 "), short=%" PRIu64
-			     ", unsupported=%" PRIu64 ", trampoline bytes=%" PRIu64 "\n",
+			     ", unsupported=%" PRIu64 ", trampoline bytes=%" PRIu64 ", vcvtps2ph=%" PRIu64 "\n",
 			     Common::PathToString(program->file_name.filename()).c_str(), result.candidates,
 			     result.patched, result.via_cave, result.trapped, result.relocated,
-			     result.too_short, result.unsupported, result.trampoline_bytes);
+			     result.too_short, result.unsupported, result.trampoline_bytes, result.half_converts);
 		}
 		// One flush for the trampolines written by all segments.
 		if (cursor > cursor_begin) {
