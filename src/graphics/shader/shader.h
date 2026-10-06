@@ -174,6 +174,9 @@ struct ShaderPixelInputInfo {
 	uint8_t                                        target_output_mode[8]        = {};
 	uint32_t                                       target_shader_mask           = UINT32_MAX;
 	std::array<Prospero::ColorComponentMapping, 8> target_export_mapping        = {};
+	// Numeric class of each host color attachment: 0 float, 1 uint, 2 sint (Metal requires the
+	// fragment output type to match it).
+	uint8_t                                        target_numeric_class[8]      = {};
 	uint32_t                                       scratch_size_dwords          = 0;
 	bool                                           ps_pos_x                     = false;
 	bool                                           ps_pos_y                     = false;

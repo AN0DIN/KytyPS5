@@ -323,8 +323,9 @@ uint32_t ExportVector(ValueEmitContext& ctx, uint32_t data, const IR::ExportInfo
 						continue;
 					}
 					raw[component] = state.builder.AllocateId();
-					state.builder.AddFunction(spv::OpBitFieldUExtract, TypeU32(state), raw[component],
-					                          packed, ConstantU32(state, lane * 16u),
+					state.builder.AddFunction(MrtOutputMode(state, exp) == 8u ? spv::OpBitFieldSExtract
+					                                                          : spv::OpBitFieldUExtract,
+					                          TypeU32(state), raw[component], packed, ConstantU32(state, lane * 16u),
 					                          ConstantU32(state, 16));
 				}
 			}
@@ -443,6 +444,19 @@ uint32_t ConvertPositionToClipSpace(EmitterState& state, uint32_t position) {
 }
 
 } // namespace
+
+uint32_t MrtNumericClass(const EmitterState& state, uint32_t index) {
+	if (state.program.stage != ShaderType::Pixel ||
+	    index >= std::size(state.input_info.pixel->target_output_mode)) {
+		return 0;
+	}
+	const auto numeric = state.input_info.pixel->target_numeric_class[index];
+	if (numeric != 0) {
+		return numeric;
+	}
+	// UINT16_ABGR exports always went to an integer output.
+	return state.input_info.pixel->target_output_mode[index] == 7u ? 1u : 0u;
+}
 uint32_t EmitWqmU64(EmitterState& state, uint32_t value) {
 	const auto shifted_one = state.builder.AllocateId();
 	const auto merged_one  = state.builder.AllocateId();
@@ -520,9 +534,19 @@ void EmitSetAttribute(ValueEmitContext& ctx, const IR::Inst& inst) {
 		if (state.program.stage != ShaderType::Mesh && variable == 0) {
 			return;
 		}
-		const bool uint_output = MrtOutputMode(state, exp) == 7u;
-		const auto vector_type = uint_output ? TypeU32Vector(state, 4) : TypeF32Vector(state, 4);
+		const auto numeric     = exp.kind == IR::ExportTargetKind::Mrt ? MrtNumericClass(state, exp.index)
+		                                                               : 0u;
+		const bool uint_output = numeric != 0u;
+		const auto vector_type = numeric == 1u   ? TypeU32Vector(state, 4)
+		                         : numeric == 2u ? TypeI32Vector(state, 4)
+		                                         : TypeF32Vector(state, 4);
 		auto       value       = ExportVector(ctx, data, exp, uint_output);
+		if (numeric == 2u) {
+			// The exported bits are already integers: reinterpret them for a SINT attachment.
+			const auto signed_value = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpBitcast, vector_type, signed_value, value);
+			value = signed_value;
+		}
 		if (state.program.stage == ShaderType::Pixel && exp.kind == IR::ExportTargetKind::Mrt &&
 		    exp.index == 0 && !uint_output &&
 		    state.input_info.pixel->alpha_blend_source != ShaderAlphaBlendSource::None) {

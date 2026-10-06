@@ -11,6 +11,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
+#include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -33,6 +34,7 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <vulkan/vulkan_format_traits.hpp>
 #include <xxhash.h>
 
 namespace Libs::Graphics {
@@ -641,6 +643,16 @@ void PipelineCache::Save() {
 	m_driver_cache = nullptr;
 }
 
+// 0 float, 1 uint, 2 sint. Integer attachments take integer fragment outputs and never blend
+// (Metal rejects a float4 output or blending on them; GCN ignores blending there).
+static uint8_t RenderTargetNumericClass(vk::Format format) {
+	if (format == vk::Format::eUndefined) {
+		return 0;
+	}
+	const std::string_view numeric = vk::componentNumericFormat(format, 0);
+	return numeric == "UINT" ? 1u : (numeric == "SINT" ? 2u : 0u);
+}
+
 PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     const HW::VertexShaderInfo& vertex_regs, const HW::PixelShaderInfo& pixel_regs,
     const HW::ShaderRegisters& sh, const HW::Context& context, const HW::UserConfig& user_config,
@@ -682,6 +694,15 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		} else {
 			pixel_info.parameter_mode = ShaderPixelParameterMode::FirstVertex;
 		}
+		for (uint32_t slot = 0; slot < std::size(pixel_info.target_numeric_class); slot++) {
+			const auto& rt = context.GetRenderTarget(slot);
+			if (pixel_info.target_output_mode[slot] != 0 && rt.base.addr != 0) {
+				pixel_info.target_numeric_class[slot] = RenderTargetNumericClass(
+				    TextureGetRenderTargetFormat(rt.info.format, rt.info.channel_type,
+				                                 rt.info.channel_order)
+				        .format);
+			}
+		}
 		const auto& blend = context.GetBlendControl(0);
 		pixel_info.dual_source_blending =
 		    blend.enable && !context.GetRenderTarget(0).info.blend_bypass &&
@@ -693,8 +714,10 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 			// MRT1 supplies the second blend source for target 0.
 			pixel_info.target_output_mode[1]    = pixel_info.target_output_mode[0];
 			pixel_info.target_export_mapping[1] = pixel_info.target_export_mapping[0];
+			pixel_info.target_numeric_class[1]  = pixel_info.target_numeric_class[0];
 		} else if (blend.enable && !context.GetRenderTarget(0).info.blend_bypass &&
 		           pixel_info.target_output_mode[0] != 0 && pixel_info.target_output_mode[0] != 7 &&
+		           pixel_info.target_numeric_class[0] == 0 &&
 		           std::all_of(std::begin(pixel_info.target_output_mode) + 1,
 		                       std::end(pixel_info.target_output_mode),
 		                       [](uint8_t mode) { return mode == 0; })) {
@@ -810,7 +833,8 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 		if (slot == 0 && ps_input_info != nullptr) {
 			alpha_source = ps_input_info->alpha_blend_source;
 		}
-		static_params.blend_enable[slot] = bc.enable && !rt.info.blend_bypass;
+		static_params.blend_enable[slot] = bc.enable && !rt.info.blend_bypass &&
+		                                   RenderTargetNumericClass(rendering.color_formats[slot]) == 0;
 		if (static_params.blend_enable[slot] && alpha_source == ShaderAlphaBlendSource::None &&
 		    ClassifyBlendMapping(bc, colors[i].export_mapping) != BlendMappingSupport::Direct) {
 			static_params.blend_enable[slot] = false;

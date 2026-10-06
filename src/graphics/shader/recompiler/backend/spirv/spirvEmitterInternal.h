@@ -167,6 +167,8 @@ uint32_t TypeU32Vector(EmitterState& state, uint32_t components);
 
 uint32_t TypeU32Composite(EmitterState& state, uint32_t components);
 uint32_t TypeI32Vector(EmitterState& state, uint32_t components);
+// Numeric class of a pixel shader MRT output: 0 float, 1 uint, 2 sint.
+uint32_t MrtNumericClass(const EmitterState& state, uint32_t index);
 uint32_t TypeF32Vector(EmitterState& state, uint32_t components);
 uint32_t TypePointer(EmitterState& state, spv::StorageClass storage_class, uint32_t pointee);
 uint32_t TypeFunction(EmitterState& state);
