@@ -572,6 +572,18 @@ void DefineInputs(EmitterState& state) {
 		}
 	}
 	if (state.program.info.subgroup_local_invocation_id) {
+#if defined(__APPLE__)
+		// MoltenVK rejects SubgroupLocalInvocationId in vertex functions ("Subgroup builtins are
+		// not available in this type of function"); subgroup operations are accepted there.
+		const auto stage = state.program.stage;
+		state.subgroup_lane_emulated = stage == ShaderType::Vertex || stage == ShaderType::Local ||
+		                               stage == ShaderType::TessellationEvaluation;
+#endif
+		if (state.subgroup_lane_emulated) {
+			state.subgroup_local_invocation_id_variable = DefineInterfaceVariable(
+			    state, TypeU32(state), spv::StorageClassPrivate, "emulated_SubgroupInvocationID");
+			return;
+		}
 		const auto variable = DefineInterfaceVariable(state, TypeU32(state), spv::StorageClassInput,
 		                                              "gl_SubgroupInvocationID");
 		state.subgroup_local_invocation_id_variable = variable;
@@ -771,6 +783,9 @@ void DefineModule(EmitterState& state) {
 	}
 	if (state.lane_count == 2 || state.program.info.subgroup_ballot) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformBallot);
+	}
+	if (state.subgroup_lane_emulated) {
+		state.builder.RequireCapability(spv::CapabilityGroupNonUniformArithmetic);
 	}
 	if (state.program.info.subgroup_shuffle) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformShuffle);

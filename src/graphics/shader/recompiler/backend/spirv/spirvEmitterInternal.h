@@ -139,6 +139,9 @@ struct EmitterState {
 	const IR::Block*           current_block                         = nullptr;
 	uint32_t                   pixel_valid_mask_variable             = 0;
 	uint32_t                   subgroup_local_invocation_id_variable = 0;
+	// Set when the lane index is computed at entry instead of read from the builtin (Metal
+	// vertex functions have no simdgroup lane builtin).
+	bool                       subgroup_lane_emulated                = false;
 	uint32_t                   per_vertex_variable                   = 0;
 	uint32_t                   point_size_variable                   = 0;
 	uint32_t                   clip_distance_variable                = 0;

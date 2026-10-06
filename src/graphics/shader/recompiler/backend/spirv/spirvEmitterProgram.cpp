@@ -722,6 +722,16 @@ void EmitProgram(EmitterState& state) {
 		state.builder.AddFunction(spv::OpStore, state.pixel_valid_mask_variable,
 		                          ConstantU32(state, 1));
 	}
+	if (state.subgroup_lane_emulated) {
+		// Rank of this invocation among the active lanes, taken before any divergence: the lane
+		// index as long as the active lanes are the low ones (vertices are packed from lane 0).
+		const auto lane = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpGroupNonUniformIAdd, TypeU32(state), lane,
+		                          ConstantU32(state, spv::ScopeSubgroup),
+		                          static_cast<uint32_t>(spv::GroupOperationExclusiveScan),
+		                          ConstantU32(state, 1));
+		state.builder.AddFunction(spv::OpStore, state.subgroup_local_invocation_id_variable, lane);
+	}
 	if (state.lds_storage_class == spv::StorageClassStorageBuffer && state.lds_variable != 0) {
 		const auto group_x = EmitInputComponentU32(state, IR::StageInputKind::WorkgroupId, 0);
 		const auto group_y = EmitInputComponentU32(state, IR::StageInputKind::WorkgroupId, 1);
