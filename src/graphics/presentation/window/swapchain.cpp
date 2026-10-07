@@ -15,13 +15,24 @@
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window/windowInternal.h"
 
+#include "common/timer.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <vector>
+#include <vk_mem_alloc.h>
 #include <vulkan/vk_platform.h>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_STATIC
+#include "stb_image_write.h"
 
 // IWYU pragma: no_include <intrin.h>
 
@@ -39,6 +50,117 @@ struct Presenter::Frame {
 	void Transit(CommandRecorder command, vk::ImageLayout layout, vk::AccessFlags2 access);
 	void CopyFrom(CommandBuffer& command, Image& source);
 	void Clear(CommandBuffer& command, const vk::ClearColorValue& color);
+};
+
+// Headless monitoring: KYTY_FRAME_DUMP_DIR=<dir> writes the presented guest image as PNG every
+// KYTY_FRAME_DUMP_SECONDS (default 30), without screen-recording rights on the host.
+class FrameDump final {
+public:
+	FrameDump() {
+		const char* dir = std::getenv("KYTY_FRAME_DUMP_DIR");
+		if (dir == nullptr || dir[0] == '\0') {
+			return;
+		}
+		m_dir                 = dir;
+		const char* seconds   = std::getenv("KYTY_FRAME_DUMP_SECONDS");
+		const auto  period_s  = seconds != nullptr ? std::strtod(seconds, nullptr) : 30.0;
+		m_period              = static_cast<uint64_t>(std::max(period_s, 1.0) *
+                                         static_cast<double>(Common::Timer::QueryPerformanceFrequency()));
+		m_next                = Common::Timer::QueryPerformanceCounter();
+		std::filesystem::create_directories(m_dir);
+	}
+
+	[[nodiscard]] bool Due() const {
+		return !m_dir.empty() && Common::Timer::QueryPerformanceCounter() >= m_next;
+	}
+
+	// Records a copy of the source frame (already in TransferSrcOptimal) into a host buffer.
+	bool Record(GraphicContext& graphics, vk::CommandBuffer command, const VulkanImage& source) {
+		const auto& extent = source.extent;
+		m_width            = extent.width;
+		m_height           = extent.height;
+		m_format           = source.format;
+		vk::BufferCreateInfo info {};
+		info.size  = static_cast<vk::DeviceSize>(m_width) * m_height * 4u;
+		info.usage = vk::BufferUsageFlagBits::eTransferDst;
+		VmaAllocationCreateInfo alloc {};
+		alloc.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+		alloc.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+		VkBuffer          buffer = VK_NULL_HANDLE;
+		VmaAllocationInfo result {};
+		if (vmaCreateBuffer(graphics.allocator, reinterpret_cast<const VkBufferCreateInfo*>(&info),
+		                    &alloc, &buffer, &m_allocation, &result) != VK_SUCCESS) {
+			m_next = Common::Timer::QueryPerformanceCounter() + m_period;
+			return false;
+		}
+		m_buffer = buffer;
+		m_mapped = result.pMappedData;
+		vk::BufferImageCopy region {};
+		region.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+		region.imageSubresource.layerCount = 1;
+		region.imageExtent                 = vk::Extent3D {m_width, m_height, 1};
+		command.copyImageToBuffer(source.image, vk::ImageLayout::eTransferSrcOptimal, m_buffer, 1,
+		                          &region);
+		vk::MemoryBarrier to_host {};
+		to_host.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+		to_host.dstAccessMask = vk::AccessFlagBits::eHostRead;
+		command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+		                        vk::PipelineStageFlagBits::eHost, {}, 1, &to_host, 0, nullptr, 0,
+		                        nullptr);
+		return true;
+	}
+
+	// Call after the recording submission has completed.
+	void Write(GraphicContext& graphics, uint64_t frame) {
+		vmaInvalidateAllocation(graphics.allocator, m_allocation, 0, VK_WHOLE_SIZE);
+		const auto* src = static_cast<const uint8_t*>(m_mapped);
+		std::vector<uint8_t> rgb(static_cast<size_t>(m_width) * m_height * 3u);
+		const bool bgra = m_format == vk::Format::eB8G8R8A8Unorm ||
+		                  m_format == vk::Format::eB8G8R8A8Srgb;
+		const bool a2b10 = m_format == vk::Format::eA2B10G10R10UnormPack32;
+		for (size_t i = 0, n = static_cast<size_t>(m_width) * m_height; i < n; i++) {
+			uint32_t px = 0;
+			std::memcpy(&px, src + i * 4u, 4u);
+			uint8_t r = 0, g = 0, b = 0;
+			if (a2b10) {
+				r = static_cast<uint8_t>((px & 0x3ffu) >> 2u);
+				g = static_cast<uint8_t>(((px >> 10u) & 0x3ffu) >> 2u);
+				b = static_cast<uint8_t>(((px >> 20u) & 0x3ffu) >> 2u);
+			} else {
+				r = static_cast<uint8_t>(px >> (bgra ? 16u : 0u));
+				g = static_cast<uint8_t>(px >> 8u);
+				b = static_cast<uint8_t>(px >> (bgra ? 0u : 16u));
+			}
+			rgb[i * 3u]      = r;
+			rgb[i * 3u + 1u] = g;
+			rgb[i * 3u + 2u] = b;
+		}
+		const auto path =
+		    (m_dir / fmt::format("frame_{:04d}_f{}.png", m_count++, frame)).string();
+		const int ok = stbi_write_png(path.c_str(), static_cast<int>(m_width),
+		                              static_cast<int>(m_height), 3, rgb.data(),
+		                              static_cast<int>(m_width * 3u));
+		std::printf("[frame-dump] %s %ux%u format=%d frame=%llu ok=%d\n", path.c_str(), m_width,
+		            m_height, static_cast<int>(m_format), static_cast<unsigned long long>(frame),
+		            ok);
+		std::fflush(stdout);
+		vmaDestroyBuffer(graphics.allocator, m_buffer, m_allocation);
+		m_buffer     = nullptr;
+		m_allocation = nullptr;
+		m_next       = Common::Timer::QueryPerformanceCounter() + m_period;
+	}
+
+private:
+	std::filesystem::path m_dir;
+	uint64_t              m_period     = 0;
+	uint64_t              m_next       = 0;
+	uint32_t              m_count      = 0;
+	uint32_t              m_width      = 0;
+	uint32_t              m_height     = 0;
+	vk::Format            m_format     = vk::Format::eUndefined;
+	vk::Buffer            m_buffer     = nullptr;
+	VmaAllocation         m_allocation = nullptr;
+	void*                 m_mapped     = nullptr;
 };
 
 class FramePool final {
@@ -358,6 +480,8 @@ struct Presenter::Impl {
 	Common::Mutex         present_mutex;
 	std::array<Layer, 2>  layers {};
 	std::atomic<uint64_t> presented_overlay_revision {0};
+	FrameDump             frame_dump;
+	uint64_t              presented_frames = 0;
 };
 
 vk::SurfaceFormatKHR Swapchain::SelectFormat() {
@@ -1032,6 +1156,7 @@ void Presenter::Impl::Present() {
 	if (hdr_changed || swapchain.NeedsResize()) {
 		RecoverSwapchain(Swapchain::Status::Recreate);
 	}
+	uint64_t dump_tick = 0;
 	for (uint32_t attempt = 0; attempt < 2; attempt++) {
 		auto status = swapchain.AcquireNextImage(present_scheduler);
 		if (status != Swapchain::Status::Success) {
@@ -1045,7 +1170,17 @@ void Presenter::Impl::Present() {
 			    overlay_visual.active && swapchain.PrepareSystemOverlay();
 			swapchain.RecordPresentCommands(command, layers[0].frame, layers[1],
 			                                draw_system_overlay);
+			// The dump copies into a direct command buffer; deferred present recording is skipped.
+			if (layers[0].frame != nullptr && frame_dump.Due() && command.Handle().IsDirect()) {
+				dump_tick = frame_dump.Record(window.graphic_ctx, command.Handle().Direct(),
+				                              layers[0].frame->image)
+				                ? 1
+				                : 0;
+			}
 			const auto tick = swapchain.Submit(present_scheduler);
+			if (dump_tick != 0) {
+				dump_tick = tick;
+			}
 			for (const auto& layer: layers) {
 				if (layer.frame != nullptr) {
 					layer.frame->present_tick = tick;
@@ -1053,10 +1188,16 @@ void Presenter::Impl::Present() {
 			}
 		}
 		status = swapchain.Present();
+		if (dump_tick != 0) {
+			present_scheduler.Wait(dump_tick);
+			frame_dump.Write(window.graphic_ctx, presented_frames);
+			dump_tick = 0;
+		}
 		if (status != Swapchain::Status::Success) {
 			RecoverSwapchain(status);
 			continue;
 		}
+		presented_frames++;
 
 		presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
 		window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed);

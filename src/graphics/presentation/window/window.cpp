@@ -31,6 +31,11 @@
 #include <vector>
 #include <vulkan/vk_platform.h>
 #include <filesystem>
+#include <chrono>
+#include <cstdio>
+#include <fstream>
+#include <sstream>
+#include <thread>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_SIMD
@@ -41,6 +46,8 @@
 #define KYTY_DBG_INPUT
 
 namespace Libs::Graphics {
+
+static void StartScriptedInput(SDL_Window* window);
 
 struct EventKeyboard {
 	bool     down;
@@ -830,7 +837,79 @@ static void WindowCreate(WindowContext& context) {
 	SDL_SetWindowPosition(context.window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 	HostInputInit(context.window);
 	InitializeSystemOverlayInput(context.window);
+	StartScriptedInput(context.window);
 	context.UpdateIcon();
+}
+
+// Headless input: KYTY_INPUT_FILE=<file> is followed like `tail -f`; each new line is
+// `down <key>`, `up <key>`, `tap <key> [ms]` or `wait <ms>` with SDL key names (default map:
+// J = Cross, Return = Options, arrows = D-pad, WASD = left stick). Keys go through the SDL event
+// queue, so the window needs no keyboard focus.
+static void PushScriptedKey(SDL_Window* window, SDL_Keycode key, bool down) {
+	SDL_Event event {};
+	event.type         = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+	event.key.windowID = SDL_GetWindowID(window);
+	event.key.key      = key;
+	event.key.scancode = SDL_GetScancodeFromKey(key, nullptr);
+	event.key.down     = down;
+	SDL_PushEvent(&event);
+}
+
+static void StartScriptedInput(SDL_Window* window) {
+	const char* file = std::getenv("KYTY_INPUT_FILE");
+	if (file == nullptr || file[0] == '\0') {
+		return;
+	}
+	std::thread([window, path = std::string(file)] {
+		std::ifstream  in;
+		std::string    line;
+		std::streamoff offset = 0;
+		for (;;) {
+			if (!in.is_open()) {
+				in.open(path);
+				if (!in.is_open()) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(200));
+					continue;
+				}
+				in.seekg(offset);
+			}
+			// EOF sticks to the stream on macOS: reopen and resume from the last complete line.
+			if (!std::getline(in, line) || in.eof()) {
+				in.close();
+				in.clear();
+				std::this_thread::sleep_for(std::chrono::milliseconds(50));
+				continue;
+			}
+			offset = in.tellg();
+			std::istringstream words(line);
+			std::string        op;
+			std::string        name;
+			int                ms = 150;
+			words >> op;
+			if (op == "wait") {
+				words >> ms;
+				std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+				continue;
+			}
+			words >> name >> ms;
+			const SDL_Keycode key = SDL_GetKeyFromName(name.c_str());
+			std::printf("[input] %s %s (key=0x%x)\n", op.c_str(), name.c_str(),
+			            static_cast<unsigned>(key));
+			std::fflush(stdout);
+			if (key == SDLK_UNKNOWN) {
+				continue;
+			}
+			if (op == "down" || op == "tap") {
+				PushScriptedKey(window, key, true);
+			}
+			if (op == "tap") {
+				std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+			}
+			if (op == "up" || op == "tap") {
+				PushScriptedKey(window, key, false);
+			}
+		}
+	}).detach();
 }
 
 uint32_t WindowContext::InitialWindowFlags(bool fullscreen) noexcept {
