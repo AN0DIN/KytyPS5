@@ -26,6 +26,8 @@
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <string>
+#include <thread>
 #include <vector>
 #include <vk_mem_alloc.h>
 #include <vulkan/vk_platform.h>
@@ -54,6 +56,10 @@ struct Presenter::Frame {
 
 // Headless monitoring: KYTY_FRAME_DUMP_DIR=<dir> writes the presented guest image as PNG every
 // KYTY_FRAME_DUMP_SECONDS (default 30), without screen-recording rights on the host.
+// KYTY_FRAME_DUMP_SECONDS_FILE=<path>: period read from a file, re-read every second; 0 or a
+// missing file pauses the dumps (no capture inside a measurement window).
+// The present thread only records the copy and collects it once the GPU is done; conversion
+// and PNG encoding run on a worker thread, and the file keeps the time of the copy.
 class FrameDump final {
 public:
 	FrameDump() {
@@ -61,21 +67,38 @@ public:
 		if (dir == nullptr || dir[0] == '\0') {
 			return;
 		}
-		m_dir                 = dir;
-		const char* seconds   = std::getenv("KYTY_FRAME_DUMP_SECONDS");
-		const auto  period_s  = seconds != nullptr ? std::strtod(seconds, nullptr) : 30.0;
-		m_period              = static_cast<uint64_t>(std::max(period_s, 1.0) *
-                                         static_cast<double>(Common::Timer::QueryPerformanceFrequency()));
-		m_next                = Common::Timer::QueryPerformanceCounter();
+		m_dir                = dir;
+		const char* seconds  = std::getenv("KYTY_FRAME_DUMP_SECONDS");
+		SetPeriod(seconds != nullptr ? std::strtod(seconds, nullptr) : 30.0);
+		const char* file = std::getenv("KYTY_FRAME_DUMP_SECONDS_FILE");
+		if (file != nullptr && file[0] != '\0') {
+			m_period_file = file;
+		}
+		m_next = Common::Timer::QueryPerformanceCounter();
 		std::filesystem::create_directories(m_dir);
 	}
 
-	[[nodiscard]] bool Due() const {
-		return !m_dir.empty() && Common::Timer::QueryPerformanceCounter() >= m_next;
+	~FrameDump() {
+		if (m_worker.joinable()) {
+			m_worker.join();
+		}
+	}
+
+	FrameDump(const FrameDump&)            = delete;
+	FrameDump& operator=(const FrameDump&) = delete;
+
+	[[nodiscard]] bool Due() {
+		if (m_dir.empty() || m_pending_tick != 0 || m_writing.load(std::memory_order_acquire)) {
+			return false;
+		}
+		const auto now = Common::Timer::QueryPerformanceCounter();
+		ReadPeriodFile(now);
+		return m_period != 0 && now >= m_next;
 	}
 
 	// Records a copy of the source frame (already in TransferSrcOptimal) into a host buffer.
-	bool Record(GraphicContext& graphics, vk::CommandBuffer command, const VulkanImage& source) {
+	bool Record(GraphicContext& graphics, vk::CommandBuffer command, const VulkanImage& source,
+	            uint64_t frame) {
 		const auto& extent = source.extent;
 		m_width            = extent.width;
 		m_height           = extent.height;
@@ -93,8 +116,10 @@ public:
 			m_next = Common::Timer::QueryPerformanceCounter() + m_period;
 			return false;
 		}
-		m_buffer = buffer;
-		m_mapped = result.pMappedData;
+		m_buffer      = buffer;
+		m_mapped      = result.pMappedData;
+		m_frame       = frame;
+		m_copy_time   = std::filesystem::file_time_type::clock::now();
 		vk::BufferImageCopy region {};
 		region.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
 		region.imageSubresource.layerCount = 1;
@@ -110,17 +135,78 @@ public:
 		return true;
 	}
 
-	// Call after the recording submission has completed.
-	void Write(GraphicContext& graphics, uint64_t frame) {
+	// The recording submission got this tick.
+	void Submitted(uint64_t tick) { m_pending_tick = tick; }
+
+	// Called after every present: once the copy has completed, hands it to the worker thread.
+	void Poll(GraphicContext& graphics, CommandScheduler& scheduler) {
+		if (m_pending_tick == 0 || !scheduler.IsFree(m_pending_tick)) {
+			return;
+		}
+		m_pending_tick = 0;
 		vmaInvalidateAllocation(graphics.allocator, m_allocation, 0, VK_WHOLE_SIZE);
-		const auto* src = static_cast<const uint8_t*>(m_mapped);
-		std::vector<uint8_t> rgb(static_cast<size_t>(m_width) * m_height * 3u);
-		const bool bgra = m_format == vk::Format::eB8G8R8A8Unorm ||
-		                  m_format == vk::Format::eB8G8R8A8Srgb;
-		const bool a2b10 = m_format == vk::Format::eA2B10G10R10UnormPack32;
-		for (size_t i = 0, n = static_cast<size_t>(m_width) * m_height; i < n; i++) {
+		std::vector<uint8_t> raw(static_cast<size_t>(m_width) * m_height * 4u);
+		std::memcpy(raw.data(), m_mapped, raw.size());
+		vmaDestroyBuffer(graphics.allocator, m_buffer, m_allocation);
+		m_buffer     = nullptr;
+		m_allocation = nullptr;
+		m_next       = Common::Timer::QueryPerformanceCounter() + m_period;
+		if (m_worker.joinable()) {
+			m_worker.join();
+		}
+		const auto path =
+		    (m_dir / fmt::format("frame_{:04d}_f{}.png", m_count++, m_frame)).string();
+		m_writing.store(true, std::memory_order_release);
+		m_worker = std::thread([this, raw = std::move(raw), path, width = m_width,
+		                        height = m_height, format = m_format, frame = m_frame,
+		                        copy_time = m_copy_time]() {
+			Write(raw, path, width, height, format, frame, copy_time);
+			m_writing.store(false, std::memory_order_release);
+		});
+	}
+
+private:
+	void SetPeriod(double seconds) {
+		m_period = seconds <= 0.0
+		               ? 0
+		               : static_cast<uint64_t>(std::max(seconds, 1.0) *
+		                                       static_cast<double>(Common::Timer::QueryPerformanceFrequency()));
+	}
+
+	void ReadPeriodFile(uint64_t now) {
+		if (m_period_file.empty() || now - m_checked < Common::Timer::QueryPerformanceFrequency()) {
+			return;
+		}
+		m_checked      = now;
+		double seconds = 0.0;
+		if (FILE* f = std::fopen(m_period_file.c_str(), "r"); f != nullptr) {
+			char text[64] = {};
+			const size_t read = std::fread(text, 1, sizeof(text) - 1, f);
+			std::fclose(f);
+			text[read] = '\0';
+			seconds    = std::strtod(text, nullptr);
+		}
+		const auto before = m_period;
+		SetPeriod(seconds);
+		if (m_period != before) {
+			std::printf("[frame-dump] period=%g s\n", m_period == 0 ? 0.0 : std::max(seconds, 1.0));
+			std::fflush(stdout);
+			if (before == 0) {
+				m_next = now;
+			}
+		}
+	}
+
+	static void Write(const std::vector<uint8_t>& raw, const std::string& path, uint32_t width,
+	                  uint32_t height, vk::Format format, uint64_t frame,
+	                  std::filesystem::file_time_type copy_time) {
+		std::vector<uint8_t> rgb(static_cast<size_t>(width) * height * 3u);
+		const bool bgra = format == vk::Format::eB8G8R8A8Unorm ||
+		                  format == vk::Format::eB8G8R8A8Srgb;
+		const bool a2b10 = format == vk::Format::eA2B10G10R10UnormPack32;
+		for (size_t i = 0, n = static_cast<size_t>(width) * height; i < n; i++) {
 			uint32_t px = 0;
-			std::memcpy(&px, src + i * 4u, 4u);
+			std::memcpy(&px, raw.data() + i * 4u, 4u);
 			uint8_t r = 0, g = 0, b = 0;
 			if (a2b10) {
 				r = static_cast<uint8_t>((px & 0x3ffu) >> 2u);
@@ -135,32 +221,33 @@ public:
 			rgb[i * 3u + 1u] = g;
 			rgb[i * 3u + 2u] = b;
 		}
-		const auto path =
-		    (m_dir / fmt::format("frame_{:04d}_f{}.png", m_count++, frame)).string();
-		const int ok = stbi_write_png(path.c_str(), static_cast<int>(m_width),
-		                              static_cast<int>(m_height), 3, rgb.data(),
-		                              static_cast<int>(m_width * 3u));
-		std::printf("[frame-dump] %s %ux%u format=%d frame=%llu ok=%d\n", path.c_str(), m_width,
-		            m_height, static_cast<int>(m_format), static_cast<unsigned long long>(frame),
-		            ok);
+		const int ok = stbi_write_png(path.c_str(), static_cast<int>(width),
+		                              static_cast<int>(height), 3, rgb.data(),
+		                              static_cast<int>(width * 3u));
+		std::error_code error;
+		std::filesystem::last_write_time(path, copy_time, error);
+		std::printf("[frame-dump] %s %ux%u format=%d frame=%llu ok=%d\n", path.c_str(), width,
+		            height, static_cast<int>(format), static_cast<unsigned long long>(frame), ok);
 		std::fflush(stdout);
-		vmaDestroyBuffer(graphics.allocator, m_buffer, m_allocation);
-		m_buffer     = nullptr;
-		m_allocation = nullptr;
-		m_next       = Common::Timer::QueryPerformanceCounter() + m_period;
 	}
 
-private:
-	std::filesystem::path m_dir;
-	uint64_t              m_period     = 0;
-	uint64_t              m_next       = 0;
-	uint32_t              m_count      = 0;
-	uint32_t              m_width      = 0;
-	uint32_t              m_height     = 0;
-	vk::Format            m_format     = vk::Format::eUndefined;
-	vk::Buffer            m_buffer     = nullptr;
-	VmaAllocation         m_allocation = nullptr;
-	void*                 m_mapped     = nullptr;
+	std::filesystem::path           m_dir;
+	std::string                     m_period_file;
+	uint64_t                        m_period       = 0;
+	uint64_t                        m_next         = 0;
+	uint64_t                        m_checked      = 0;
+	uint64_t                        m_pending_tick = 0;
+	uint64_t                        m_frame        = 0;
+	uint32_t                        m_count        = 0;
+	uint32_t                        m_width        = 0;
+	uint32_t                        m_height       = 0;
+	vk::Format                      m_format       = vk::Format::eUndefined;
+	vk::Buffer                      m_buffer       = nullptr;
+	VmaAllocation                   m_allocation   = nullptr;
+	void*                           m_mapped       = nullptr;
+	std::filesystem::file_time_type m_copy_time {};
+	std::atomic<bool>               m_writing {false};
+	std::thread                     m_worker;
 };
 
 class FramePool final {
@@ -1173,7 +1260,7 @@ void Presenter::Impl::Present() {
 			// The dump copies into a direct command buffer; deferred present recording is skipped.
 			if (layers[0].frame != nullptr && frame_dump.Due() && command.Handle().IsDirect()) {
 				dump_tick = frame_dump.Record(window.graphic_ctx, command.Handle().Direct(),
-				                              layers[0].frame->image)
+				                              layers[0].frame->image, presented_frames)
 				                ? 1
 				                : 0;
 			}
@@ -1189,10 +1276,10 @@ void Presenter::Impl::Present() {
 		}
 		status = swapchain.Present();
 		if (dump_tick != 0) {
-			present_scheduler.Wait(dump_tick);
-			frame_dump.Write(window.graphic_ctx, presented_frames);
+			frame_dump.Submitted(dump_tick);
 			dump_tick = 0;
 		}
+		frame_dump.Poll(window.graphic_ctx, present_scheduler);
 		if (status != Swapchain::Status::Success) {
 			RecoverSwapchain(status);
 			continue;
