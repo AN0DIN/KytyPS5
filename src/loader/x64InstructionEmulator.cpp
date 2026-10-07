@@ -13,7 +13,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+#include <io.h> // open, write
+#else
 #include <unistd.h>
+#endif
 #include <vector>
 #include <emmintrin.h>
 #include <xmmintrin.h>
