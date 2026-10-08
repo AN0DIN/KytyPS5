@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -1081,7 +1082,16 @@ void BufferCache::RecordMirrorCopies(CommandBuffer& command) {
 
 bool BufferCache::DownloadOnReadbackQueue(Buffer& buffer, std::span<const vk::BufferCopy> copies,
                                           uint64_t total_size) {
-	if (!m_graphics.readback_queue || m_device_address_pending) {
+	// Without a transfer-only family (MoltenVK exposes one family with one queue), the copy goes
+	// to the graphics queue in a command buffer of its own: it still waits only for the work
+	// already submitted, not for the command buffer being recorded, which a wait for the whole GPU
+	// would submit and wait for. KYTY_READBACK_MAIN_QUEUE=0 keeps the wait for the whole GPU.
+	static const bool main_queue = [] {
+		const char* value = std::getenv("KYTY_READBACK_MAIN_QUEUE");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	const bool use_main_queue = !m_graphics.readback_queue && main_queue;
+	if ((!m_graphics.readback_queue && !use_main_queue) || m_device_address_pending) {
 		return false;
 	}
 	const auto buffer_address = buffer.CpuAddress();
@@ -1118,7 +1128,8 @@ bool BufferCache::DownloadOnReadbackQueue(Buffer& buffer, std::span<const vk::Bu
 		vk::CommandPoolCreateInfo pool_info {};
 		pool_info.flags            = vk::CommandPoolCreateFlagBits::eResetCommandBuffer |
 		                             vk::CommandPoolCreateFlagBits::eTransient;
-		pool_info.queueFamilyIndex = m_graphics.readback_family;
+		pool_info.queueFamilyIndex =
+		    use_main_queue ? m_graphics.queue_family : m_graphics.readback_family;
 		vk::CommandBufferAllocateInfo allocate {};
 		allocate.level              = vk::CommandBufferLevel::ePrimary;
 		allocate.commandBufferCount = 1;
@@ -1168,7 +1179,14 @@ bool BufferCache::DownloadOnReadbackQueue(Buffer& buffer, std::span<const vk::Bu
 	submit.pWaitDstStageMask  = &wait_stage;
 	submit.commandBufferCount = 1;
 	submit.pCommandBuffers    = &command;
-	if (m_graphics.readback_queue.submit(1, &submit, m_readback.fence) != vk::Result::eSuccess) {
+	vk::Result submitted = vk::Result::eSuccess;
+	if (use_main_queue) {
+		Common::LockGuard queue_lock(m_graphics.queue_mutex);
+		submitted = m_graphics.queue.submit(1, &submit, m_readback.fence);
+	} else {
+		submitted = m_graphics.readback_queue.submit(1, &submit, m_readback.fence);
+	}
+	if (submitted != vk::Result::eSuccess) {
 		EXIT("BufferCache: readback queue submission failed\n");
 	}
 	for (;;) {
