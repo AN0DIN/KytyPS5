@@ -8,16 +8,19 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #include <io.h> // open, write
 #else
 #include <unistd.h>
 #endif
+#include <string>
 #include <vector>
 #include <emmintrin.h>
 #include <xmmintrin.h>
@@ -900,18 +903,38 @@ struct WideStoreTrap {
 };
 // KYTY_WIDE_STORE_HOT names a profile: sites redirected often are appended to it, and on the
 // next start those sites are patched by moving the following instructions into the trampoline
-// instead of through a signal per execution.
+// instead of through a signal per execution. Without it the profile is
+// _PipelineCache/<TITLE_ID>.wide_stores in the working directory, next to the pipeline cache, so
+// a game learns its hot sites in one run and patches them from the next one on; "none" turns the
+// profile off.
 constexpr uint32_t WideStoreHotHits    = 1024;
 int                g_wide_store_hot_fd = -1;
+
+std::string& WideStoreProfileTitle() {
+	static std::string title_id;
+	return title_id;
+}
 
 const std::vector<uint64_t>& WideStoreHotSites() {
 	static const std::vector<uint64_t> sites = [] {
 		std::vector<uint64_t> result;
-		const char*           path = std::getenv("KYTY_WIDE_STORE_HOT");
-		if (path == nullptr) {
+		std::string           path;
+		if (const char* value = std::getenv("KYTY_WIDE_STORE_HOT"); value != nullptr) {
+			path = value;
+		} else {
+			const std::string& title_id = WideStoreProfileTitle();
+			if (!title_id.empty() && std::all_of(title_id.begin(), title_id.end(), [](char c) {
+				    return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '-' || c == '_';
+			    })) {
+				std::error_code error;
+				std::filesystem::create_directories("_PipelineCache", error);
+				path = "_PipelineCache/" + title_id + ".wide_stores";
+			}
+		}
+		if (path.empty() || path == "none") {
 			return result;
 		}
-		if (FILE* file = std::fopen(path, "r"); file != nullptr) {
+		if (FILE* file = std::fopen(path.c_str(), "r"); file != nullptr) {
 			unsigned long long site = 0;
 			while (std::fscanf(file, "%llx", &site) == 1) {
 				result.push_back(site);
@@ -920,7 +943,7 @@ const std::vector<uint64_t>& WideStoreHotSites() {
 		}
 		std::sort(result.begin(), result.end());
 		result.erase(std::unique(result.begin(), result.end()), result.end());
-		g_wide_store_hot_fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0644);
+		g_wide_store_hot_fd = open(path.c_str(), O_WRONLY | O_APPEND | O_CREAT, 0644);
 		return result;
 	}();
 	return sites;
@@ -1497,6 +1520,10 @@ bool TryEmulate(void* native_context) {
 	       TryEmulateShaNi(context) ||
 #endif
 	       TryEmulateCpuExtensions(context);
+}
+
+void SetWideStoreProfileTitle(const std::string& title_id) {
+	WideStoreProfileTitle() = title_id;
 }
 
 } // namespace Loader::X64InstructionEmulator
