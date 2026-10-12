@@ -2,6 +2,7 @@
 #define KYTY_LOADER_X64_INSTRUCTION_EMULATOR_H_
 
 #include <cstdint>
+#include <string>
 
 namespace Loader::X64InstructionEmulator {
 
@@ -25,6 +26,10 @@ struct WideStoreSplitResult {
 // trampoline_end, which must be within +/-2 GiB of the code.
 WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* cursor,
                                      uint64_t trampoline_end);
+
+// Title whose hot wide store profile (_PipelineCache/<title_id>.wide_stores) SplitWideStores()
+// uses when KYTY_WIDE_STORE_HOT is not set; call before the first SplitWideStores().
+void SetWideStoreProfileTitle(const std::string& title_id);
 
 } // namespace Loader::X64InstructionEmulator
 

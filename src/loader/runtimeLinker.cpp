@@ -19,6 +19,7 @@
 #include "loader/elf.h"
 #include "loader/gamePatch.h"
 #include "loader/guestInstructionPatcher.h"
+#include "loader/systemContent.h"
 #include "loader/jit.h"
 #include "loader/symbolDatabase.h"
 #include "loader/x64InstructionEmulator.h"
@@ -1691,6 +1692,12 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 #if defined(__APPLE__)
 	// Rosetta aborts the process on some 256-bit stores (see SplitWideStoresEnabled).
 	const bool split_wide_stores = SplitWideStoresEnabled();
+	if (split_wide_stores) {
+		std::string title_id;
+		if (SystemContentParamSfoGetString("TITLE_ID", &title_id)) {
+			X64InstructionEmulator::SetWideStoreProfileTitle(title_id);
+		}
+	}
 #else
 	const bool split_wide_stores = false;
 #endif
