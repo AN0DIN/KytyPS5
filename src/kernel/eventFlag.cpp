@@ -9,6 +9,9 @@
 #include "libs/errno.h"
 #include "libs/libs.h"
 
+#include <algorithm>
+#include <vector>
+
 namespace Libs::LibKernel::EventFlag {
 
 LIB_NAME("libkernel", "libkernel");
@@ -41,13 +44,42 @@ public:
 private:
 	enum class Status { Set, Canceled, Deleted };
 
-	Common::Mutex   m_mutex;
-	Common::CondVar m_cond_var;
-	Status          m_status          = Status::Set;
-	int             m_waiting_threads = 0;
-	std::string     m_name;
-	bool            m_single_thread = false;
-	uint64_t        m_bits          = 0;
+	// A blocked Wait(). Set() releases the waiters whose condition the pattern meets, oldest
+	// first, applies their clear mode and wakes only them, so the other waiters keep sleeping.
+	struct Waiter {
+		uint64_t        bits       = 0;
+		WaitMode        wait_mode  = WaitMode::And;
+		ClearMode       clear_mode = ClearMode::None;
+		bool            released   = false;
+		uint64_t        result     = 0;
+		Common::CondVar cond_var;
+	};
+
+	[[nodiscard]] static bool Matches(uint64_t pattern, uint64_t bits, WaitMode wait_mode) {
+		return wait_mode == WaitMode::And ? (pattern & bits) == bits : (pattern & bits) != 0;
+	}
+
+	void ApplyClear(ClearMode clear_mode, uint64_t bits) {
+		switch (clear_mode) {
+			case ClearMode::All: m_bits = 0; break;
+			case ClearMode::Bits: m_bits &= ~bits; break;
+			case ClearMode::None: break;
+		}
+	}
+
+	void WakeAllWaiters() {
+		for (auto* waiter: m_waiters) {
+			waiter->cond_var.Signal();
+		}
+	}
+
+	Common::Mutex        m_mutex;
+	std::vector<Waiter*> m_waiters;
+	Status               m_status          = Status::Set;
+	int                  m_waiting_threads = 0;
+	std::string          m_name;
+	bool                 m_single_thread = false;
+	uint64_t             m_bits          = 0;
 };
 
 namespace {
@@ -89,7 +121,7 @@ KernelEventFlagPrivate::~KernelEventFlagPrivate() {
 
 	m_status = Status::Deleted;
 
-	m_cond_var.SignalAll();
+	WakeAllWaiters();
 
 	while (m_waiting_threads > 0) {
 		m_mutex.Unlock();
@@ -124,57 +156,60 @@ KernelEventFlagPrivate::Result KernelEventFlagPrivate::Wait(uint64_t bits, WaitM
 		return Result::AlreadyWaiting;
 	}
 
-	while (!((wait_mode == WaitMode::And && (m_bits & bits) == bits) ||
-	         (wait_mode == WaitMode::Or && (m_bits & bits) != 0))) {
-		if ((elapsed >= micros && !infinitely)) {
-			if (result != nullptr) {
-				*result = m_bits;
-			}
-			update_timeout();
-			return Result::TimedOut;
+	if (Matches(m_bits, bits, wait_mode)) {
+		if (result != nullptr) {
+			*result = m_bits;
 		}
-
-		m_waiting_threads++;
-
-		if (infinitely) {
-			m_cond_var.Wait(&m_mutex);
-		} else {
-			m_cond_var.WaitFor(&m_mutex, micros - elapsed);
-		}
-
-		m_waiting_threads--;
-
-		elapsed = static_cast<uint32_t>(t.GetTimeS() * 1000000.0);
-
-		switch (m_status) {
-			case Status::Canceled:
-				if (result != nullptr) {
-					*result = m_bits;
-				}
-				update_timeout();
-				return Result::Canceled;
-			case Status::Deleted:
-				if (result != nullptr) {
-					*result = m_bits;
-				}
-				update_timeout();
-				return Result::Deleted;
-			case Status::Set: break;
-		}
+		update_timeout();
+		ApplyClear(clear_mode, bits);
+		return Result::Ok;
 	}
 
+	Waiter waiter;
+	waiter.bits       = bits;
+	waiter.wait_mode  = wait_mode;
+	waiter.clear_mode = clear_mode;
+	m_waiters.push_back(&waiter);
+	m_waiting_threads++;
+
+	Result status = Result::Ok;
+	for (;;) {
+		if (waiter.released) {
+			break;
+		}
+		if (m_status == Status::Canceled) {
+			status = Result::Canceled;
+			break;
+		}
+		if (m_status == Status::Deleted) {
+			status = Result::Deleted;
+			break;
+		}
+		if (elapsed >= micros && !infinitely) {
+			status = Result::TimedOut;
+			break;
+		}
+
+		if (infinitely) {
+			waiter.cond_var.Wait(&m_mutex);
+		} else {
+			waiter.cond_var.WaitFor(&m_mutex, micros - elapsed);
+		}
+
+		elapsed = static_cast<uint32_t>(t.GetTimeS() * 1000000.0);
+	}
+
+	if (!waiter.released) {
+		m_waiters.erase(std::find(m_waiters.begin(), m_waiters.end(), &waiter));
+	}
+	m_waiting_threads--;
+
 	if (result != nullptr) {
-		*result = m_bits;
+		*result = (waiter.released ? waiter.result : m_bits);
 	}
 	update_timeout();
 
-	switch (clear_mode) {
-		case ClearMode::All: m_bits = 0; break;
-		case ClearMode::Bits: m_bits &= ~bits; break;
-		case ClearMode::None: break;
-	}
-
-	return Result::Ok;
+	return status;
 }
 
 void KernelEventFlagPrivate::Set(uint64_t bits) {
@@ -190,7 +225,18 @@ void KernelEventFlagPrivate::Set(uint64_t bits) {
 
 	m_bits |= bits;
 
-	m_cond_var.SignalAll();
+	for (auto it = m_waiters.begin(); it != m_waiters.end();) {
+		auto* waiter = *it;
+		if (!Matches(m_bits, waiter->bits, waiter->wait_mode)) {
+			++it;
+			continue;
+		}
+		waiter->released = true;
+		waiter->result   = m_bits;
+		ApplyClear(waiter->clear_mode, waiter->bits);
+		it = m_waiters.erase(it);
+		waiter->cond_var.Signal();
+	}
 }
 
 void KernelEventFlagPrivate::Clear(uint64_t bits) {
@@ -225,7 +271,7 @@ void KernelEventFlagPrivate::Cancel(uint64_t bits, int* num_waiting_threads) {
 	m_status = Status::Canceled;
 	m_bits   = bits;
 
-	m_cond_var.SignalAll();
+	WakeAllWaiters();
 
 	while (m_waiting_threads > 0) {
 		m_mutex.Unlock();
