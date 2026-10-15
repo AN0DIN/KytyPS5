@@ -209,11 +209,30 @@ uint32_t EmitCompositeExtractU32x2(EmitterState& state, uint32_t arg0, IR::Value
 	return EmitNative<spv::OpCompositeExtract, IR::Type::U32>(state, arg0, arg1.U32());
 }
 
+// v_cvt_pkrtz_f16_f32 rounds toward zero. The pair is packed with the native conversion, which
+// gives one of the two halves around each input, then a half whose magnitude exceeds its input's
+// takes one unit off: half signs and magnitudes are separate, so that is the next value toward
+// zero, and a zero or a NaN is never adjusted. The result has the bits of a bit-by-bit conversion
+// for every finite input and infinity (a NaN stays a NaN), in a few instructions instead of
+// about 25 integer operations per half.
 uint32_t EmitPackFloat2x16Rtz(EmitterState& state, uint32_t arg0, uint32_t arg1) {
-	const auto low  = EmitF32ToF16RtzBits(state, arg0);
-	const auto high = Binary(state, spv::OpShiftLeftLogical, TypeU32(state),
-	                         EmitF32ToF16RtzBits(state, arg1), ConstantU32(state, 16));
-	return Binary(state, spv::OpBitwiseOr, TypeU32(state), low, high);
+	const auto pair = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(state, 2), pair, arg0, arg1);
+	const auto packed = EmitPackHalf2x16(state, pair);
+	const auto back   = EmitExt(state, TypeF32Vector(state, 2), GLSLstd450UnpackHalf2x16, {packed});
+	auto       result = packed;
+	for (uint32_t i = 0; i < 2; i++) {
+		const auto rounded = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, TypeF32(state), rounded, back, i);
+		const auto above =
+		    Binary(state, spv::OpFOrdGreaterThan, TypeBool(state),
+		           EmitExt(state, TypeF32(state), GLSLstd450FAbs, {rounded}),
+		           EmitExt(state, TypeF32(state), GLSLstd450FAbs, {i == 0 ? arg0 : arg1}));
+		result = Binary(state, spv::OpISub, TypeU32(state), result,
+		                Select(state, TypeU32(state), above,
+		                       ConstantU32(state, i == 0 ? 1u : 0x10000u), ConstantU32(state, 0)));
+	}
+	return result;
 }
 
 uint32_t EmitFPSaturate32(EmitterState& state, uint32_t arg0) {
