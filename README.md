@@ -11,6 +11,8 @@
 
 **[Development on Discord](https://discord.gg/UNrkMqGaBg)** — KytyPS5 development.
 
+**[GTA V on Apple Silicon](docs/gtav-macos.md)** — setup and measured frame rates on this branch.
+
 KytyPS5 is a free and open-source PlayStation 5 translation layer written in C++ for Windows
 and Linux, with experimental macOS support. It is based on a heavily modified version of
 [Kyty](https://github.com/InoriRus/Kyty). The project is in active development, and behavior
