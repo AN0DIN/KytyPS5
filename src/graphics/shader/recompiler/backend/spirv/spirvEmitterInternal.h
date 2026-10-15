@@ -468,10 +468,6 @@ inline constexpr auto EmitOrU32 = EmitNative<spv::OpBitwiseOr, IR::Type::U32, ui
 uint32_t EmitCompareU32Constant(EmitterState& state, spv::Op opcode, uint32_t value,
                                 uint32_t constant);
 
-uint32_t EmitSubConstantMinusU32(EmitterState& state, uint32_t constant, uint32_t value);
-
-uint32_t EmitF32ToF16RtzBits(EmitterState& state, uint32_t f32);
-
 inline constexpr auto EmitBitcastF32ToU32 = EmitNative<spv::OpBitcast, IR::Type::U32, uint32_t>;
 
 inline constexpr auto EmitBitcastU32ToF32 = EmitNative<spv::OpBitcast, IR::Type::F32, uint32_t>;
