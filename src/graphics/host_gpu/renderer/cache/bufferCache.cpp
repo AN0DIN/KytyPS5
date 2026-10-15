@@ -1117,6 +1117,23 @@ bool BufferCache::DownloadOnReadbackQueue(Buffer& buffer, std::span<const vk::Bu
 		return false;
 	}
 	NoteReadbackWait(readback_begin, readback_end, device_address, false);
+	if (m_graphics.direct_readback && !buffer.Mapped().empty()) {
+		// A mapped guest buffer (GraphicContext::direct_readback): the host waits for the writers'
+		// submissions only and copies the bytes itself, with no GPU copy queued behind the work
+		// submitted since.
+		m_scheduler.GetMasterSemaphore().Wait(needed);
+		// Earlier asynchronous publications of these bytes run first, as in the queued path.
+		m_scheduler.WaitPriorityOperations(needed);
+		const auto* mapped = buffer.Mapped().data();
+		for (const auto& copy: copies) {
+			if (!buffer.IsCoherent()) {
+				buffer.Invalidate(copy.srcOffset, copy.size);
+			}
+			Libs::LibKernel::Memory::WriteBacking(buffer_address + copy.srcOffset,
+			                                      mapped + copy.srcOffset, copy.size);
+		}
+		return true;
+	}
 	// The copy waits for the needed submission on the GPU, but must not be submitted before it:
 	// the driver may then block inside vkQueueSubmit, holding locks a submission of the
 	// recording thread (or a present) needs.

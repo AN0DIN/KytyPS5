@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <memory>
@@ -1116,6 +1117,12 @@ void WindowContext::CreateVulkan() {
 	EXIT_IF(graphic_ctx.queue == nullptr);
 	if (graphic_ctx.readback_family != static_cast<uint32_t>(-1)) {
 		graphic_ctx.device.getQueue(graphic_ctx.readback_family, 0, &graphic_ctx.readback_queue);
+	}
+	{
+		const char* direct          = std::getenv("KYTY_READBACK_DIRECT");
+		graphic_ctx.direct_readback = graphic_ctx.physical_device.getProperties().deviceType ==
+		                                  vk::PhysicalDeviceType::eIntegratedGpu &&
+		                              (direct == nullptr || std::strcmp(direct, "0") != 0);
 	}
 
 	if (!graphic_ctx.CreateAllocator()) {

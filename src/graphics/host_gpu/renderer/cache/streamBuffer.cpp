@@ -85,8 +85,14 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	        ? VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT
 	        : 0;
 	VmaAllocationCreateInfo allocation_info {};
+	// Guest buffers of an integrated GPU live in host-visible memory, mapped for readbacks
+	// (GraphicContext::direct_readback).
+	const VmaAllocationCreateFlags direct_flags =
+	    usage == MemoryUsage::DeviceLocal && cpu_address != 0 && graphics.direct_readback
+	        ? VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
+	        : 0;
 	allocation_info.flags =
-	    VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT | bda_flag | AllocationFlags(usage);
+	    VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT | bda_flag | AllocationFlags(usage) | direct_flags;
 	allocation_info.usage = AllocationUsage(usage);
 	allocation_info.preferredFlags = usage == MemoryUsage::DeviceLocal
 	                                     ? VkMemoryPropertyFlags {}

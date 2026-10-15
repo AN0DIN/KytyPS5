@@ -52,6 +52,10 @@ struct GraphicContext {
 	// buffer readbacks that must not wait for the work queued on `queue` after the writes they
 	// read. Null without such a family; buffers are then shared by `queue_family` alone.
 	vk::Queue                          readback_queue  = nullptr;
+	// Device-local memory is host-visible (an integrated GPU): guest buffers are mapped and a
+	// readback whose writers were submitted reads the buffer itself. KYTY_READBACK_DIRECT=0 turns
+	// it off.
+	bool                               direct_readback = false;
 	uint32_t                           readback_family = static_cast<uint32_t>(-1);
 	// Draws whose arguments the GPU writes read them on the GPU (vkCmdDraw*Indirect*).
 	bool                               indirect_draws_enabled                = false;

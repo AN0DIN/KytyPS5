@@ -482,6 +482,17 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	if (m_submit_hook != nullptr) {
 		m_submit_hook(m_submit_hook_data, m_command);
 	}
+	if (m_graphics.direct_readback) {
+		// Readbacks read mapped guest buffers on the host once the tick is signalled
+		// (BufferCache::DownloadOnReadbackQueue()): make every write visible to the host.
+		m_command.EndRendering();
+		vk::MemoryBarrier to_host {};
+		to_host.srcAccessMask = vk::AccessFlagBits::eMemoryWrite;
+		to_host.dstAccessMask = vk::AccessFlagBits::eHostRead;
+		m_command.Handle().pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+		                                   vk::PipelineStageFlagBits::eHost, {}, 1, &to_host, 0,
+		                                   nullptr, 0, nullptr);
+	}
 
 	m_command.End();
 	// Only this scheduler's owner allocates its ticks, in submission order.
