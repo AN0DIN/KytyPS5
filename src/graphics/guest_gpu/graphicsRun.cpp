@@ -1634,8 +1634,8 @@ bool CommandProcessor::TryExecuteDrawIndirectOnGpu(const GpuOperation& operation
 			default: return false;
 		}
 	}
-	if (!m_renderer.GetRenderExecutor().CanDrawIndirectOnGpu(CurrentBuffer(), indirect.indexed,
-	                                                         indirect.index_type, index_bytes)) {
+	if (!m_renderer.GetRenderExecutor().CanDrawIndirectOnGpu(
+	        CurrentBuffer(), indirect.indexed, indirect.index_type, index_bytes, count != 0)) {
 		return false;
 	}
 	// The host GPU adds the offsets it reads to the vertex and instance indices and leaves the

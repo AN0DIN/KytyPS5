@@ -651,8 +651,8 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	device_features.drawIndirectFirstInstance = supported_features2.features.drawIndirectFirstInstance;
 	features12.drawIndirectCount              = supported_features12.drawIndirectCount;
 	graphics.indirect_draws_enabled = device_features.multiDrawIndirect == VK_TRUE &&
-	                                  device_features.drawIndirectFirstInstance == VK_TRUE &&
-	                                  features12.drawIndirectCount == VK_TRUE;
+	                                  device_features.drawIndirectFirstInstance == VK_TRUE;
+	graphics.indirect_count_enabled = features12.drawIndirectCount == VK_TRUE;
 	device_features.shaderInt64 = VK_TRUE;
 	device_features.shaderFloat64 =
 	    supported_features2.features.shaderFloat64 &&

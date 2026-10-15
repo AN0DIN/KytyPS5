@@ -271,9 +271,11 @@ public:
 
 private:
 	// Whether an indirect draw with the bound registers can leave its arguments to the GPU
-	// (see DrawIndirectSource); `index_type` is the guest index type of an indexed draw.
+	// (see DrawIndirectSource); `index_type` is the guest index type of an indexed draw,
+	// `counted` whether the GPU also reads the draw count.
 	[[nodiscard]] bool CanDrawIndirectOnGpu(const CommandBuffer& buffer, bool indexed,
-	                                        uint32_t index_type, uint64_t index_bytes) const;
+	                                        uint32_t index_type, uint64_t index_bytes,
+	                                        bool counted) const;
 	void DrawIndex(uint64_t submit_id, CommandBuffer& buffer, const DrawIndexArgs& args);
 	void DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const DrawAutoArgs& args);
 

@@ -59,6 +59,8 @@ struct GraphicContext {
 	uint32_t                           readback_family = static_cast<uint32_t>(-1);
 	// Draws whose arguments the GPU writes read them on the GPU (vkCmdDraw*Indirect*).
 	bool                               indirect_draws_enabled                = false;
+	// The draw count can be read on the GPU too (vkCmdDraw*IndirectCount, drawIndirectCount).
+	bool                               indirect_count_enabled                = false;
 
 	[[nodiscard]] const vk::PhysicalDeviceProperties& GetPhysicalDeviceProperties() const {
 		return physical_device_properties;

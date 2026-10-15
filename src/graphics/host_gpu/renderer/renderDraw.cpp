@@ -1855,8 +1855,12 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 }
 
 bool RenderExecutor::CanDrawIndirectOnGpu(const CommandBuffer& buffer, bool indexed,
-                                          uint32_t index_type, uint64_t index_bytes) const {
-	if (!m_context.GetGraphics().indirect_draws_enabled) {
+                                          uint32_t index_type, uint64_t index_bytes,
+                                          bool counted) const {
+	// Without drawIndirectCount (MoltenVK), only draws without a count address read their
+	// arguments on the GPU.
+	const auto& graphics = m_context.GetGraphics();
+	if (!graphics.indirect_draws_enabled || (counted && !graphics.indirect_count_enabled)) {
 		return false;
 	}
 	const auto& ctx  = buffer.GetRegisters();
