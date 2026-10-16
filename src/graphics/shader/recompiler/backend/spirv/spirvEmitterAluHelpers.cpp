@@ -9,13 +9,6 @@ uint32_t EmitAndConstant(EmitterState& state, uint32_t value, uint32_t mask) {
 	return ret;
 }
 
-uint32_t EmitShiftRightConstant(EmitterState& state, uint32_t value, uint32_t shift) {
-	const auto ret = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpShiftRightLogical, TypeU32(state), ret, value,
-	                          ConstantU32(state, shift));
-	return ret;
-}
-
 uint32_t EmitCompareU32Constant(EmitterState& state, spv::Op opcode, uint32_t value,
                                 uint32_t constant) {
 	const auto ret = state.builder.AllocateId();

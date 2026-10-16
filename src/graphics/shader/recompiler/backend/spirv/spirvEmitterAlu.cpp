@@ -209,12 +209,6 @@ uint32_t EmitCompositeExtractU32x2(EmitterState& state, uint32_t arg0, IR::Value
 	return EmitNative<spv::OpCompositeExtract, IR::Type::U32>(state, arg0, arg1.U32());
 }
 
-// v_cvt_pkrtz_f16_f32 rounds toward zero. The pair is packed with the native conversion, which
-// gives one of the two halves around each input, then a half whose magnitude exceeds its input's
-// takes one unit off: half signs and magnitudes are separate, so that is the next value toward
-// zero, and a zero or a NaN is never adjusted. The result has the bits of a bit-by-bit conversion
-// for every finite input and infinity (a NaN stays a NaN), in a few instructions instead of
-// about 25 integer operations per half.
 uint32_t EmitPackFloat2x16Rtz(EmitterState& state, uint32_t arg0, uint32_t arg1) {
 	const auto pair = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(state, 2), pair, arg0, arg1);
