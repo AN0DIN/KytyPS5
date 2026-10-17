@@ -114,10 +114,11 @@ uint32_t EmitFPMad32(EmitterState& state, uint32_t a, uint32_t b, uint32_t c) {
 	// its frame time. Pixel and compute shaders use one fused multiply-add instead (the result may
 	// differ in the last bit). Vertex stages keep the exact rounding so that positions computed by
 	// different shaders stay identical, and so do pixel shaders that export depth.
-	const bool depth_export =
-	    state.input_info.pixel != nullptr && state.input_info.pixel->ps_depth_export_enable;
-	if ((state.program.stage == ShaderType::Pixel && !depth_export) ||
-	    state.program.stage == ShaderType::Compute) {
+	// input_info is a union: read the pixel member only for a pixel shader.
+	const bool pixel        = state.program.stage == ShaderType::Pixel;
+	const bool depth_export = pixel && state.input_info.pixel != nullptr &&
+	                          state.input_info.pixel->ps_depth_export_enable;
+	if ((pixel && !depth_export) || state.program.stage == ShaderType::Compute) {
 		return EmitGlsl<GLSLstd450Fma, IR::Type::F32>(state, a, b, c);
 	}
 #endif

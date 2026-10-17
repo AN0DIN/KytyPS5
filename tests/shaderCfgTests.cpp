@@ -15562,7 +15562,7 @@ void TestLegacyMadStageRounding() {
   struct MadCounts {
     uint32_t fmul;
     uint32_t fadd;
-    uint32_t ext_inst;
+    uint32_t fma;
     uint32_t no_contraction;
   };
   const auto count = [](const CompileOptions &options, bool with_mad) {
@@ -15578,7 +15578,7 @@ void TestLegacyMadStageRounding() {
     CheckSpirvBinaryValidates(binary);
     return MadCounts{SpirvInstructionOpcodeCount(binary, spv::OpFMul),
                      SpirvInstructionOpcodeCount(binary, spv::OpFAdd),
-                     SpirvInstructionOpcodeCount(binary, spv::OpExtInst),
+                     SpirvExtInstCount(binary, GLSLstd450Fma),
                      CountSourceOccurrences(DisassembleSpirvBinary(binary),
                                             "NoContraction")};
   };
@@ -15589,7 +15589,7 @@ void TestLegacyMadStageRounding() {
     const bool ok =
         mad.fmul - base.fmul == (fused ? 0u : 1u) &&
         mad.fadd - base.fadd == (fused ? 0u : 1u) &&
-        mad.ext_inst - base.ext_inst == (fused ? 1u : 0u) &&
+        mad.fma - base.fma == (fused ? 1u : 0u) &&
         mad.no_contraction - base.no_contraction == (fused ? 0u : 2u);
     Check(ok, text);
   };
